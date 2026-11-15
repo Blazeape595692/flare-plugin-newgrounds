@@ -16,6 +16,10 @@
 // pages live on <name>.newgrounds.com subdomains, so per-user post lists aren't
 // available.
 
+// Each request gets its own limit, shorter than Flare's 30 seconds for a whole call, so a
+// slow server fails that request (a normal error) instead of the call (a plugin crash).
+var REQUEST_TIMEOUT_MS = 12000;
+
 var ORIGIN = "https://www.newgrounds.com";
 
 var NG_CAPABILITIES = {
@@ -49,7 +53,7 @@ var FEEDS = {
   "feed-audio": "/social/feeds/show/favorite-artists-audio",
 };
 
-defineFlareSocialPlugin({
+defineFlareSocialPlugin(guardPlugin("Newgrounds", {
   // Flare offers a plugin on its add-account screen only when this recognizes the typed address.
   detector: {
     async detect(request, context) {
@@ -183,7 +187,36 @@ defineFlareSocialPlugin({
       },
     },
   },
-});
+}));
+
+// Flare treats any error that isn't made with flare.error() as a plugin crash, and pauses
+// the plugin after three in a minute. Every entry point therefore turns a stray error
+// (a failed request, unexpected data) into an ordinary error Flare shows as a message.
+function guardPlugin(name, definition) {
+  function wrap(value) {
+    if (typeof value === "function") {
+      return async function () {
+        try {
+          return await value.apply(this, arguments);
+        } catch (error) {
+          if (error && error.__flarePluginErrorV1 !== undefined) throw error;
+          var network = !!(error && typeof error.code === "string" && /^host\./.test(error.code));
+          throw flare.error({
+            code: network ? "Network" : "InvalidResponse",
+            message: { value: network ? "Could not reach " + name : name + " sent something this plugin couldn't read" },
+          });
+        }
+      };
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      var out = {};
+      Object.keys(value).forEach(function (key) { out[key] = wrap(value[key]); });
+      return out;
+    }
+    return value;
+  }
+  return wrap(definition);
+}
 
 // ---------------------------------------------------------------- listing
 
@@ -644,9 +677,10 @@ async function send(context, path, xhr, cookies, write) {
   }
   var response;
   try {
+    if (!request.timeoutMillis) request.timeoutMillis = REQUEST_TIMEOUT_MS;
     response = await flare.http.request(request);
   } catch (error) {
-    if (error && typeof error === "object" && error.code === "host.unavailable") fail("Network", "Could not reach Newgrounds");
+    if (!(error && error.__flarePluginErrorV1 !== undefined)) fail("Network", "Could not reach Newgrounds");
     throw error;
   }
   if (response.status === 401 || response.status === 419) fail("AuthenticationRequired", "Your Newgrounds sign-in expired; sign in again");
