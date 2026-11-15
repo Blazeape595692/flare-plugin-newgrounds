@@ -5,20 +5,29 @@
 // "X-Requested-With: XMLHttpRequest", and content pages carry Open Graph/schema.org
 // metadata. Everything is public, read-only browsing on https://www.newgrounds.com.
 //
-// Limits: Flare only lets an account call the address it was added with, and user
+// Sign-in: "Sign in on Newgrounds" opens Newgrounds' own login page in Flare's
+// browser; Flare hands the session cookies to this plugin, which confirms the
+// signed-in user from the page's PHP.set('activeuser', ...) data. Signed-in accounts
+// can favourite/unfavourite (POST/DELETE to the item's favourite URL with the page's
+// CSRF token, as the website does). The older "Browse Newgrounds" option stays for
+// read-only use without signing in.
+//
+// Limit: Flare only lets an account call the address it was added with, and user
 // pages live on <name>.newgrounds.com subdomains, so per-user post lists aren't
-// available. Newgrounds hides its login cookies from scripts, so there is no real
-// sign-in: you pick the username to browse as, and actions (favourite, follow,
-// voting) aren't supported.
+// available.
 
 var ORIGIN = "https://www.newgrounds.com";
 
 var NG_CAPABILITIES = {
   "flare.datasource.timeline/v1": ["page"],
-  "flare.datasource.post/v1": ["detail"],
+  "flare.datasource.post/v1": ["detail", "mutate"],
   "flare.datasource.profile/v1": ["byId", "byHandle"],
   "flare.datasource.search/v1": ["posts", "profiles", "discoverPosts", "discoverProfiles", "discoverHashtags"],
 };
+
+// The manifest's cookie probe lists every session cookie name Newgrounds has used
+// (Flare only passes cookies named there); check() verifies the session with the server.
+var PROBE_URL = ORIGIN + "/";
 
 // Timeline id -> listing path (paged with ?offset=N&inner=1).
 var LISTINGS = {
@@ -41,6 +50,33 @@ defineFlareSocialPlugin({
   },
 
   login: {
+    browser: {
+      async begin(request, context) {
+        requireNgOrigin(context.origin);
+        return { type: "webCookie", startUrl: ORIGIN + "/passport" };
+      },
+      async check(request, context) {
+        requireNgOrigin(context.origin);
+        var cookies = asArray(request.cookies && request.cookies.cookies)
+          .filter(function (c) { return c && c.sourceUrl === PROBE_URL && c.name && c.value; })
+          .map(function (c) { return { name: String(c.name), value: String(c.value) }; });
+        if (!cookies.length) return { type: "pending" };
+        var page = String((await send(context, "/social", false, cookies)).body || "");
+        var user = activeUser(page);
+        if (!user) return { type: "pending" }; // not signed in yet
+        var profile = userProfile(user.name, user.avatar, context);
+        return {
+          type: "success",
+          value: {
+            accountId: profile.key.id,
+            origin: context.origin,
+            credential: { username: user.name, userId: user.id, cookies: cookies },
+            profile: profile,
+            capabilities: NG_CAPABILITIES,
+          },
+        };
+      },
+    },
     browse: {
       async begin(request, context) {
         requireNgOrigin(context.origin);
@@ -74,6 +110,27 @@ defineFlareSocialPlugin({
     post: {
       async detail(request, context) {
         return { post: await fetchDetail(context, request.key) };
+      },
+      async mutate(request, context) {
+        if (request.action !== "Favourite" && request.action !== "Unfavourite") unsupported("Newgrounds doesn't support this action here");
+        var cookies = await sessionCookies();
+        if (!cookies) unsupported("Sign in with \"Sign in on Newgrounds\" to favourite");
+        var path = itemPath(request.key);
+        var page = await getText(context, "/" + path);
+        requireSignedIn(page);
+        var fave = favouriteInfo(page);
+        if (!fave) unsupported("This item can't be favourited");
+        var want = request.action === "Favourite";
+        if (fave.active !== want) {
+          var token = textOf(page, /<meta name="csrf-token" content="([^"]+)"/);
+          if (!token) invalidResponse("Newgrounds didn't provide a security token");
+          await send(context, null, true, cookies, {
+            url: want ? fave.store : fave.destroy,
+            method: want ? "POST" : "DELETE",
+            token: token,
+          });
+        }
+        return { type: "updatedPost", post: await fetchDetail(context, request.key) };
       },
     },
 
@@ -195,11 +252,18 @@ function cardPost(path, attrs, chunk, context) {
 
 // ----------------------------------------------------------------- detail
 
-async function fetchDetail(context, key) {
+function itemPath(key) {
   var path = String(key.id);
   if (!/^(portal\/view\/\d+|art\/view\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+|audio\/listen\/\d+)$/.test(path)) notFound("Unknown Newgrounds item");
+  return path;
+}
+
+async function fetchDetail(context, key) {
+  var path = itemPath(key);
   var kind = path.split("/")[0];
   var page = await getText(context, "/" + path);
+  var cookies = await sessionCookies();
+  if (cookies) requireSignedIn(page);
   var title = decode(meta(page, "og:title")) || "Untitled";
   var description = decode(meta(page, "og:description"));
   var date = itemprop(page, "datePublished") || itemprop(page, "uploadDate");
@@ -239,7 +303,46 @@ async function fetchDetail(context, key) {
     if (!post.media.length && cover) post.media.push({ id: path + "#cover", type: "image", url: cover });
   }
   post.media = post.media.slice(0, 100);
+  var fave = cookies ? favouriteInfo(page) : null;
+  if (fave) post.actions = [{ action: fave.active ? "Unfavourite" : "Favourite", active: fave.active }];
   return post;
+}
+
+/** The item's own favourite button: its store/destroy URLs and whether it's active. */
+function favouriteInfo(page) {
+  var re = /initFavoriteButton\("#(ffr_ffr_[A-Za-z0-9_]+)",\s*"2-[^"]*",\s*(\{[^}]*\})\)/;
+  var m = re.exec(page);
+  if (!m) return null;
+  var urls;
+  try { urls = JSON.parse(m[2]); } catch (_) { return null; }
+  var store = httpsUrl(urls.store), destroy = httpsUrl(urls.destroy);
+  if (!store || !destroy || store.indexOf(ORIGIN + "/") !== 0 || destroy.indexOf(ORIGIN + "/") !== 0) return null;
+  var cls = textOf(page, new RegExp('class="([^"]*)"\\s+id="' + m[1] + '"')) || textOf(page, new RegExp('id="' + m[1] + '"[^>]*class="([^"]*)"'));
+  return { store: store, destroy: destroy, active: /(^|\s)active(\s|$)/.test(cls) };
+}
+
+/** Signed-in user from PHP.set('activeuser', {...}) on any page, or null. */
+function activeUser(page) {
+  if (!/PHP\.set\('user_logged_in', true\)/.test(page)) return null;
+  var raw = textOf(page, /PHP\.set\('activeuser', (\{.*?\})\);/);
+  var data;
+  try { data = JSON.parse(raw); } catch (_) { return null; }
+  var name = data && typeof data.name === "string" ? data.name : "";
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) return null;
+  var icons = data.icons && typeof data.icons === "object" ? data.icons : {};
+  var avatar = httpsUrl(icons.large) || httpsUrl(icons.medium) || httpsUrl(icons.small) || null;
+  return { name: name, id: data.id != null ? String(data.id) : "", avatar: avatar };
+}
+
+function requireSignedIn(page) {
+  if (/PHP\.set\('user_logged_in', false\)/.test(page)) fail("AuthenticationRequired", "Your Newgrounds sign-in expired; sign in again");
+}
+
+async function sessionCookies() {
+  var cred = await flare.credential.read();
+  var list = cred && typeof cred === "object" ? asArray(cred.cookies) : [];
+  list = list.filter(function (c) { return c && c.name && c.value; }).map(function (c) { return { name: String(c.name), value: String(c.value) }; });
+  return list.length ? list : null;
 }
 
 function videoMedia(video, path, cover) {
@@ -338,7 +441,7 @@ function requireNgOrigin(origin) {
 }
 
 async function getJson(context, path) {
-  var response = await send(context, path, true);
+  var response = await send(context, path, true, await accountCookies(context));
   var body = String(response.body || "").trim();
   try {
     return JSON.parse(body);
@@ -348,20 +451,33 @@ async function getJson(context, path) {
 }
 
 async function getText(context, path) {
-  return String((await send(context, path, false)).body || "");
+  return String((await send(context, path, false, await accountCookies(context))).body || "");
 }
 
-async function send(context, path, xhr) {
+/** Signed-in accounts send their session with every request. */
+async function accountCookies(context) {
+  return context.scope === "account" ? await sessionCookies() : null;
+}
+
+async function send(context, path, xhr, cookies, write) {
   requireNgOrigin(context.origin);
   var headers = { Accept: xhr ? "application/json" : "text/html" };
   if (xhr) headers["X-Requested-With"] = "XMLHttpRequest";
+  var request = { url: write ? write.url : ORIGIN + path, headers: headers };
+  if (cookies && cookies.length) request.cookies = cookies;
+  if (write) {
+    request.method = write.method;
+    headers["X-CSRF-TOKEN"] = write.token;
+    if (write.method === "POST") request.body = { type: "form", values: {} };
+  }
   var response;
   try {
-    response = await flare.http.request({ url: ORIGIN + path, headers: headers });
+    response = await flare.http.request(request);
   } catch (error) {
     if (error && typeof error === "object" && error.code === "host.unavailable") fail("Network", "Could not reach Newgrounds");
     throw error;
   }
+  if (response.status === 401 || response.status === 419) fail("AuthenticationRequired", "Your Newgrounds sign-in expired; sign in again");
   if (response.status === 404) notFound("Not found on Newgrounds");
   if (response.status === 429) {
     var e = { code: "RateLimited", message: { value: "Newgrounds is rate limiting requests" } };

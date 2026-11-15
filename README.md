@@ -13,12 +13,11 @@ A [Flare](https://github.com/flaresocialapp/Flare) plugin for browsing [Newgroun
 | Games | Open in your browser (they can't run inside Flare) |
 | Search | Movies and people |
 | Profiles | Name, avatar, level and aura |
+| Favourites | Favourite and unfavourite movies, games, art and audio from a post's page (needs "Sign in on Newgrounds") |
 
 ## Limits
 
-- **Read-only.** Newgrounds keeps its login cookies hidden from scripts, so there's no
-  real sign-in: you enter your username to use as the account's profile, and you can't
-  favourite, vote, follow or comment from Flare.
+- Following, voting and commenting aren't supported yet.
 - **No per-user post lists.** User pages live on `<name>.newgrounds.com`, and Flare only
   lets a plugin account use the one address it was added with.
 - Dates in lists come from each thumbnail's upload time; opening a post shows the exact date.
@@ -29,7 +28,12 @@ A [Flare](https://github.com/flaresocialapp/Flare) plugin for browsing [Newgroun
 
 1. In Flare, add an account and type the full address **`www.newgrounds.com`**.
    Newgrounds won't appear in the suggested server boxes, and partial text won't find it.
-2. Choose **Browse Newgrounds** and enter your Newgrounds username.
+2. Choose **Sign in on Newgrounds** and log in on Newgrounds' own sign-in page. Flare
+   keeps the session (not your password) and the plugin confirms who you are with
+   Newgrounds. If your session expires, Flare asks you to sign in again.
+
+   Or choose **Browse without signing in** and just enter your username: read-only, no
+   favouriting.
 
 ## Install
 
