@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.flareplugins.newgrounds",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "name": "Newgrounds",
   "description": "Browse Newgrounds movies, games, art and audio in Flare, and favourite when signed in",
   "permissions": {
@@ -124,6 +124,12 @@
         "id": "movies",
         "title": "Featured Movies",
         "icon": "Featured",
+        "defaultForNewAccount": true
+      },
+      {
+        "id": "feed",
+        "title": "Your Feed",
+        "icon": "Home",
         "defaultForNewAccount": true
       },
       {

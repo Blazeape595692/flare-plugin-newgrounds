@@ -101,6 +101,7 @@ defineFlareSocialPlugin({
   capabilities: {
     timeline: {
       async page(request, context) {
+        if (request.timelineId === "feed") return feedPage(context, request.page);
         var path = LISTINGS[request.timelineId];
         if (!path) unsupported("Unknown Newgrounds timeline");
         return listingPage(context, path, request.page, request.timelineId === "games");
@@ -185,6 +186,82 @@ async function listingPage(context, path, page, games) {
   var next = offset + posts.length;
   if (!posts.length || (Number.isFinite(total) && next >= total)) return { items: posts.map(toItem), endReached: true };
   return { items: posts.map(toItem), olderCursor: "offset:" + next, endReached: false };
+}
+
+// ------------------------------------------------------------------- feed
+//
+// "Your Feed" is the signed-in /social page: one .pod per event from people you
+// follow. Older events come from the page's own "View More" link.
+
+async function feedPage(context, page) {
+  if (!(await sessionCookies())) unsupported("Sign in with \"Sign in on Newgrounds\" to see your feed");
+  var cursor = page.direction !== "refresh" && page.cursor ? page.cursor : null;
+  if (cursor && !/^\/social\/feeds\/[A-Za-z0-9\/_-]{1,300}$/.test(cursor)) cursor = null;
+  var html = await getText(context, cursor || "/social");
+  requireSignedIn(html);
+  var items = parseFeed(html, context).map(function (post) { return { type: "post", post: post }; });
+  var more = textOf(html, /<a href="(?:https:\/\/www\.newgrounds\.com)?(\/social\/feeds\/[A-Za-z0-9\/_-]{1,300})"[^>]*>\s*View More\s*<\/a>/);
+  return more ? { items: items, olderCursor: more, endReached: false } : { items: items, endReached: true };
+}
+
+function parseFeed(html, context) {
+  var out = [];
+  var seen = {};
+  html.split('<div class="pod">').slice(1).forEach(function (pod) {
+    var head = textOf(pod, /<div class="pod-head">([\s\S]*?)<\/h2>/);
+    var authorName = decode(textOf(head, /<a href="https:\/\/[a-z0-9_-]+\.newgrounds\.com\/?" class="inline">([^<]+)<\/a>/)).trim();
+    var avatar = httpsUrl(textOf(head, /<image href="([^"]+)"/));
+    var when = feedDate(textOf(pod, /id="published_submission_\d+">([^<]+)</));
+    var post = null;
+    var title = pod.match(/<a class="portal-feed-large-title" href="https:\/\/www\.newgrounds\.com\/(art\/view\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (title) {
+      post = feedArtPost(title[1], decode(title[2].replace(/<[^>]+>/g, "")), pod, context);
+    } else {
+      post = parseItems(pod, context)[0] || null;
+      if (post && /\bGame by\b/.test(head.replace(/<[^>]+>/g, " "))) post.detailType = "link";
+    }
+    if (!post || seen[post.key.id]) return;
+    seen[post.key.id] = true;
+    if (when) post.createdAt = when;
+    if (/^[A-Za-z0-9_-]{1,64}$/.test(authorName)) post.author = userProfile(authorName, avatar, context);
+    out.push(post);
+  });
+  return out.slice(0, 200);
+}
+
+function feedArtPost(path, title, pod, context) {
+  var blocked = /artviewer-blocked-img/.test(pod);
+  var post = {
+    key: { id: path, host: originHost(context.origin) },
+    createdAt: new Date(0).toISOString(),
+    content: { format: "html", value: "<p><b>" + esc(title || "Untitled") + "</b></p>" +
+      (blocked ? "<p><small>Adult art: verify your age on Newgrounds to see it.</small></p>" : "") },
+    url: ORIGIN + "/" + path,
+    media: [],
+    sensitive: blocked,
+  };
+  artImages(pod).forEach(function (url, i) {
+    post.media.push({ id: path + "#" + i, type: /\.gif(\?|$)/i.test(url) ? "gif" : "image", url: url, description: title });
+  });
+  return post;
+}
+
+/** Feed times are "YYYY-MM-DD HH:MM:SS" in Newgrounds' US Eastern time. */
+function feedDate(text) {
+  var m = /^\s*(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\s*$/.exec(String(text || ""));
+  if (!m) return isoDate(text);
+  var y = +m[1], mo = +m[2], d = +m[3], h = +m[4];
+  var utc = Date.UTC(y, mo - 1, d, h, +m[5], +m[6]);
+  // US daylight time: second Sunday of March 2:00 to first Sunday of November 2:00.
+  var start = nthSunday(y, 2, 2), end = nthSunday(y, 10, 1);
+  var local = Date.UTC(y, mo - 1, d, h);
+  var daylight = local >= start + 2 * 3600000 && local < end + 2 * 3600000;
+  return new Date(utc + (daylight ? 4 : 5) * 3600000).toISOString();
+}
+
+function nthSunday(year, month, n) {
+  var first = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  return Date.UTC(year, month, 1 + ((7 - first) % 7) + (n - 1) * 7);
 }
 
 function toItem(post) {

@@ -6,7 +6,8 @@ A [Flare](https://github.com/flaresocialapp/Flare) plugin for browsing [Newgroun
 
 | Feature | Notes |
 | --- | --- |
-| Tabs | Featured Movies (default), Latest Movies, Featured Games, Featured Art (grid), Featured Audio |
+| Tabs | Featured Movies, Your Feed (signed in), Latest Movies, Featured Games, Featured Art (grid), Featured Audio |
+| Your Feed | New movies, games, art and audio from people you follow, with exact dates (needs "Sign in on Newgrounds"). Adult art you haven't age-verified for shows as blocked, like on the website. |
 | Movies | Open a movie to play it in Flare (up to 720p, with a 1080p download where available) |
 | Audio | Open a track to play it in Flare |
 | Art | Open a piece to see the full-size images |
@@ -34,6 +35,8 @@ A [Flare](https://github.com/flaresocialapp/Flare) plugin for browsing [Newgroun
 
    Or choose **Browse without signing in** and just enter your username: read-only, no
    favouriting.
+
+Accounts added before v0.3.0 don't get the Your Feed tab automatically: add it from Flare's tab settings.
 
 ## Install
 
