@@ -38,6 +38,17 @@ var LISTINGS = {
   audio: "/audio/featured",
 };
 
+// Timeline id -> signed-in feed page. "feed" is the combined /social page; the others
+// are Newgrounds' own per-type "Favorite Artists" feeds (News = blog posts).
+var FEEDS = {
+  feed: "/social",
+  "feed-movies": "/social/feeds/show/favorite-artists-movies",
+  "feed-art": "/social/feeds/show/favorite-artists-art",
+  "feed-games": "/social/feeds/show/favorite-artists-games",
+  "feed-blogs": "/social/feeds/show/favorite-artists-news",
+  "feed-audio": "/social/feeds/show/favorite-artists-audio",
+};
+
 defineFlareSocialPlugin({
   // Flare offers a plugin on its add-account screen only when this recognizes the typed address.
   detector: {
@@ -101,7 +112,7 @@ defineFlareSocialPlugin({
   capabilities: {
     timeline: {
       async page(request, context) {
-        if (request.timelineId === "feed") return feedPage(context, request.page);
+        if (FEEDS[request.timelineId]) return feedPage(context, FEEDS[request.timelineId], request.page);
         var path = LISTINGS[request.timelineId];
         if (!path) unsupported("Unknown Newgrounds timeline");
         return listingPage(context, path, request.page, request.timelineId === "games");
@@ -193,11 +204,11 @@ async function listingPage(context, path, page, games) {
 // "Your Feed" is the signed-in /social page: one .pod per event from people you
 // follow. Older events come from the page's own "View More" link.
 
-async function feedPage(context, page) {
+async function feedPage(context, start, page) {
   if (!(await sessionCookies())) unsupported("Sign in with \"Sign in on Newgrounds\" to see your feed");
   var cursor = page.direction !== "refresh" && page.cursor ? page.cursor : null;
   if (cursor && !/^\/social\/feeds\/[A-Za-z0-9\/_-]{1,300}$/.test(cursor)) cursor = null;
-  var html = await getText(context, cursor || "/social");
+  var html = await getText(context, cursor || start);
   requireSignedIn(html);
   var items = parseFeed(html, context).map(function (post) { return { type: "post", post: post }; });
   var more = textOf(html, /<a href="(?:https:\/\/www\.newgrounds\.com)?(\/social\/feeds\/[A-Za-z0-9\/_-]{1,300})"[^>]*>\s*View More\s*<\/a>/);
@@ -213,8 +224,18 @@ function parseFeed(html, context) {
     var avatar = httpsUrl(textOf(head, /<image href="([^"]+)"/));
     var when = feedDate(textOf(pod, /id="published_submission_\d+">([^<]+)</));
     var post = null;
-    var title = pod.match(/<a class="portal-feed-large-title" href="https:\/\/www\.newgrounds\.com\/(art\/view\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)"[^>]*>([\s\S]*?)<\/a>/);
-    if (title) {
+    if (/<div class="ql-body/.test(pod)) {
+      post = feedBlogPost(pod, context);
+      if (post) {
+        authorName = post.author ? post.author.displayName : authorName;
+        delete post.author;
+      }
+      when = when || post && post.createdAt;
+    }
+    var title = post ? null : pod.match(/<a class="portal-feed-large-title" href="https:\/\/www\.newgrounds\.com\/(art\/view\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (post) {
+      // blog post, built above
+    } else if (title) {
       post = feedArtPost(title[1], decode(title[2].replace(/<[^>]+>/g, "")), pod, context);
     } else {
       post = parseItems(pod, context)[0] || null;
@@ -244,6 +265,80 @@ function feedArtPost(path, title, pod, context) {
     post.media.push({ id: path + "#" + i, type: /\.gif(\?|$)/i.test(url) ? "gif" : "image", url: url, description: title });
   });
   return post;
+}
+
+// A blog ("news") post: title and link in the pod head, "Posted by NAME - Month Dth, YYYY",
+// and the post body in .ql-body. Blogs live on <name>.newgrounds.com, which Flare won't
+// let the account fetch, so the post opens in the browser for comments.
+function feedBlogPost(pod, context) {
+  var link = pod.match(/<a href="(https:\/\/([a-z0-9_-]{1,64})\.newgrounds\.com\/news\/post\/(\d{1,12}))"[^>]*>([\s\S]*?)<\/a>/i);
+  if (!link || link[2].toLowerCase() === "www") return null;
+  var by = pod.match(/<p>\s*Posted by\s*<a [^>]*>([^<]{1,64})<\/a>\s*-\s*([A-Za-z]+) (\d{1,2})(?:st|nd|rd|th)?, (\d{4})\s*<\/p>/);
+  var start = pod.search(/<div class="ql-body[^"]*"[^>]*>/);
+  var body = "";
+  if (start >= 0) {
+    body = pod.slice(pod.indexOf(">", start) + 1);
+    var end = body.search(/<\/div>\s*<script>\s*ngutils\.dom\.parse_text/);
+    if (end < 0) end = body.search(/<hr\b/);
+    if (end >= 0) body = body.slice(0, end);
+  }
+  var title = decode(link[4].replace(/<[^>]+>/g, "")).trim() || "Untitled";
+  var path = "news/" + link[2].toLowerCase() + "/" + link[3];
+  var clean = blogHtml(body);
+  var post = {
+    key: { id: path, host: originHost(context.origin) },
+    createdAt: new Date(0).toISOString(),
+    content: { format: "html", value: "<p><b>" + esc(title) + "</b></p>" + clean.html },
+    url: link[1],
+    detailType: "link",
+    media: clean.images.map(function (url, i) {
+      return { id: path + "#" + i, type: /\.gif(\?|$)/i.test(url) ? "gif" : "image", url: url };
+    }),
+    sensitive: false,
+  };
+  if (by) {
+    var month = ["january", "february", "march", "april", "may", "june", "july", "august",
+      "september", "october", "november", "december"].indexOf(by[2].toLowerCase()) + 1;
+    if (month > 0) {
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      post.createdAt = feedDate(by[4] + "-" + pad(month) + "-" + pad(+by[3]) + " 00:00:00");
+    }
+    var name = decode(by[1]).trim();
+    if (/^[A-Za-z0-9_-]{1,64}$/.test(name)) post.author = { displayName: name };
+  }
+  return post;
+}
+
+var BLOG_TAGS = { p: 1, br: 1, b: 1, strong: 1, i: 1, em: 1, u: 1, s: 1, ul: 1, ol: 1, li: 1, blockquote: 1, h1: 1, h2: 1, h3: 1, h4: 1 };
+
+/** Keeps simple formatting and https links; images become media, embeds become links. */
+function blogHtml(html) {
+  var out = "";
+  var images = [];
+  var parts = String(html || "").replace(/<script[\s\S]*?<\/script>/gi, "").split(/(<[^>]*>)/);
+  parts.forEach(function (part) {
+    if (part.charAt(0) !== "<") { out += part.replace(/</g, "&lt;").replace(/>/g, "&gt;"); return; }
+    var m = /^<(\/?)([a-z0-9]+)([^>]*)>$/i.exec(part);
+    if (!m) return;
+    var close = m[1], tag = m[2].toLowerCase(), attrs = m[3];
+    if (BLOG_TAGS[tag]) { out += tag === "br" ? (close ? "" : "<br>") : "<" + close + tag + ">"; return; }
+    if (tag === "a") {
+      if (close) { out += "</a>"; return; }
+      var href = httpsUrl(decode(attr(attrs, "href")));
+      out += href ? '<a href="' + esc(href) + '">' : "<a>";
+      return;
+    }
+    if (close) return;
+    if (tag === "img") {
+      var src = httpsUrl(decode(attr(attrs, "src") || attr(attrs, "data-smartload-src")));
+      if (src && images.length < 20) images.push(src);
+    } else if (tag === "iframe") {
+      var embed = httpsUrl(decode(attr(attrs, "src")));
+      if (embed) out += '<p><a href="' + esc(embed) + '">' + (/youtube/i.test(embed) ? "YouTube video" : "Embedded media") + "</a></p>";
+    }
+  });
+  out = out.replace(/<p>(\s|<br>)*<\/p>/g, "").trim();
+  return { html: out.length > 20000 ? out.slice(0, 20000) : out, images: images };
 }
 
 /** Feed times are "YYYY-MM-DD HH:MM:SS" in Newgrounds' US Eastern time. */

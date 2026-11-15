@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.flareplugins.newgrounds",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "name": "Newgrounds",
   "description": "Browse Newgrounds movies, games, art and audio in Flare, and favourite when signed in",
   "permissions": {
@@ -128,9 +128,35 @@
       },
       {
         "id": "feed",
-        "title": "Your Feed",
+        "title": "My Feed",
         "icon": "Home",
         "defaultForNewAccount": true
+      },
+      {
+        "id": "feed-movies",
+        "title": "Feed: Movies",
+        "icon": "Featured"
+      },
+      {
+        "id": "feed-art",
+        "title": "Feed: Art",
+        "icon": "Heart",
+        "display": "Grid"
+      },
+      {
+        "id": "feed-games",
+        "title": "Feed: Games",
+        "icon": "World"
+      },
+      {
+        "id": "feed-blogs",
+        "title": "Feed: Blogs",
+        "icon": "List"
+      },
+      {
+        "id": "feed-audio",
+        "title": "Feed: Audio",
+        "icon": "Channel"
       },
       {
         "id": "movies-latest",
