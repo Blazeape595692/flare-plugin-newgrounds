@@ -16,6 +16,7 @@ A [Flare](https://github.com/flaresocialapp/Flare) plugin for browsing [Newgroun
 | Search | Movies and people |
 | Profiles | Name, avatar, level and aura |
 | Favourites | Favourite and unfavourite movies, games, art and audio from a post's page (needs "Sign in on Newgrounds") |
+| Reviews | A post's page lists its newest reviews (up to 30) with star scores and the author's replies |
 
 ## Limits
 

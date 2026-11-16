@@ -128,8 +128,16 @@ defineFlareSocialPlugin(guardPlugin("Newgrounds", withOpenLinks("Newgrounds", {
         return { post: await fetchDetail(context, request.key) };
       },
       // Flare's post page loads through context; it shows the post on its own.
+      // Flare's post page loads through context: the post, then its reviews (with any
+      // replies from the author), newest first.
       async context(request, context) {
-        return { items: [{ type: "post", post: await fetchDetail(context, request.key) }], endReached: true };
+        var loaded = {};
+        var post = await fetchDetail(context, request.key, loaded);
+        var items = [{ type: "post", post: post }];
+        (await reviewItems(context, post, loaded.page || "")).forEach(function (item) {
+          if (items.length < 200) items.push(item);
+        });
+        return { items: items, endReached: true };
       },
       async mutate(request, context) {
         if (request.action !== "Favourite" && request.action !== "Unfavourite") unsupported("Newgrounds doesn't support this action here");
@@ -419,6 +427,109 @@ function blogHtml(html) {
 }
 
 /** Feed times are "YYYY-MM-DD HH:MM:SS" in Newgrounds' US Eastern time. */
+// ------------------------------------------------------------------ reviews
+//
+// Movies, games, audio and art pages carry their newest 5 reviews; further pages are
+// at /reviews/portal/<id>/<type>/date/<n>. A few more pages are fetched alongside,
+// and one that fails is just left out.
+
+var REVIEW_PAGES = 6;
+
+async function reviewItems(context, post, page) {
+  var reviews = parseReviews(page);
+  var link = /\/reviews\/portal\/(\d+)\/(\d+)\/date\/(\d+)/g;
+  var base = null, last = 1, m;
+  while ((m = link.exec(page))) {
+    base = "/reviews/portal/" + m[1] + "/" + m[2] + "/date/";
+    last = Math.max(last, Number(m[3]));
+  }
+  if (base && last > 1) {
+    var more = [];
+    var cookies = await accountCookies(context);
+    for (var n = 2; n <= Math.min(last, REVIEW_PAGES); n++) {
+      more.push(send(context, base + n, false, cookies, null, 8000)
+        .then(function (r) { return parseReviews(String((r && r.body) || "")); }, function () { return []; }));
+    }
+    (await Promise.all(more)).forEach(function (list) { reviews = reviews.concat(list); });
+  }
+  var seen = {};
+  var items = [];
+  reviews.forEach(function (r) {
+    if (seen[r.id]) return;
+    seen[r.id] = true;
+    var key = { id: "review/" + r.id, host: post.key.host };
+    var head = r.score != null ? "<p><b>" + stars(r.score) + "</b> " + r.score + "/5</p>" : "";
+    var review = {
+      key: key,
+      createdAt: r.time,
+      content: { format: "html", value: head + r.html },
+      replyTo: post.key,
+      detailType: "unknown",
+      url: post.url,
+    };
+    if (r.author) review.author = userProfile(r.author, r.avatar, context);
+    items.push({ type: "post", post: review });
+    if (r.response) {
+      var reply = {
+        key: { id: "review/" + r.id + "/response", host: post.key.host },
+        createdAt: r.time,
+        content: { format: "html", value: r.response.html },
+        replyTo: key,
+        detailType: "unknown",
+        url: post.url,
+      };
+      if (r.response.author) reply.author = userProfile(r.response.author, r.response.avatar, context);
+      items.push({ type: "post", post: reply });
+    }
+  });
+  return items;
+}
+
+function parseReviews(page) {
+  var out = [];
+  var chunks = String(page || "").split(/<div\s+class="pod-body review"/).slice(1);
+  chunks.forEach(function (chunk) {
+    var id = textOf(chunk, /data-review-id="(\d+)"/);
+    if (!id) return;
+    var authorTag = /<div class="review-meta">[\s\S]*?<a href="https:\/\/[^"]*" title="([^"]+)"/.exec(chunk);
+    var avatar = /<div class="review-meta">[\s\S]*?<image href="([^"]+)"/.exec(chunk);
+    var time = textOf(chunk, /<time id="review_time_\d+">([^<]+)<\/time>/);
+    var score = textOf(chunk, /title="Score: ([\d.]+)\/5\.00"/);
+    var bodyStart = chunk.search(/<div class="review-body text-content"[^>]*>/);
+    var body = "";
+    if (bodyStart >= 0) {
+      var rest = chunk.slice(chunk.indexOf(">", bodyStart) + 1);
+      var end = rest.search(/<\/div>/);
+      body = end >= 0 ? rest.slice(0, end) : "";
+    }
+    var review = {
+      id: id,
+      author: authorTag ? decode(authorTag[1]) : "",
+      avatar: avatar ? httpsUrl(decode(avatar[1])) : null,
+      time: feedDate(time) || new Date(0).toISOString(),
+      score: score ? Math.round(Number(score) * 10) / 10 : null,
+      html: blogHtml(body).html || "<p></p>",
+    };
+    var resp = /<div class="authresponse"[^>]*>([\s\S]*?)<\/strong>([\s\S]*?)<\/div>\s*<\/div>/.exec(chunk);
+    if (resp) {
+      var who = /<a href="https:\/\/[^"]*">([^<]+)<\/a>/.exec(resp[1]);
+      var face = /<image href="([^"]+)"/.exec(resp[1]);
+      review.response = {
+        author: who ? decode(who[1]).trim() : "",
+        avatar: face ? httpsUrl(decode(face[1])) : null,
+        html: blogHtml(resp[2]).html || "<p></p>",
+      };
+    }
+    out.push(review);
+  });
+  return out;
+}
+
+function stars(score) {
+  var full = Math.round(Number(score));
+  return "\u2605".repeat(Math.max(0, Math.min(5, full))) + "\u2606".repeat(Math.max(0, 5 - full));
+}
+
 function feedDate(text) {
   var m = /^\s*(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\s*$/.exec(String(text || ""));
   if (!m) return isoDate(text);
@@ -507,10 +618,11 @@ function itemPath(key) {
   return path;
 }
 
-async function fetchDetail(context, key) {
+async function fetchDetail(context, key, loaded) {
   var path = itemPath(key);
   var kind = path.split("/")[0];
   var page = await getText(context, "/" + path);
+  if (loaded) loaded.page = page;
   var cookies = await sessionCookies();
   if (cookies) requireSignedIn(page);
   var title = decode(meta(page, "og:title")) || "Untitled";
@@ -708,7 +820,7 @@ async function accountCookies(context) {
   return context.scope === "account" ? await sessionCookies() : null;
 }
 
-async function send(context, path, xhr, cookies, write) {
+async function send(context, path, xhr, cookies, write, timeoutMillis) {
   requireNgOrigin(context.origin);
   var headers = { Accept: xhr ? "application/json" : "text/html" };
   if (xhr) headers["X-Requested-With"] = "XMLHttpRequest";
@@ -721,7 +833,7 @@ async function send(context, path, xhr, cookies, write) {
   }
   var response;
   try {
-    if (!request.timeoutMillis) request.timeoutMillis = REQUEST_TIMEOUT_MS;
+    request.timeoutMillis = timeoutMillis || REQUEST_TIMEOUT_MS;
     response = await flare.http.request(request);
   } catch (error) {
     if (!(error && error.__flarePluginErrorV1 !== undefined)) fail("Network", "Could not reach Newgrounds");
