@@ -24,7 +24,7 @@ var ORIGIN = "https://www.newgrounds.com";
 
 var NG_CAPABILITIES = {
   "flare.datasource.timeline/v1": ["page"],
-  "flare.datasource.post/v1": ["detail", "mutate"],
+  "flare.datasource.post/v1": ["detail", "context", "mutate"],
   "flare.datasource.profile/v1": ["byId", "byHandle"],
   "flare.datasource.search/v1": ["posts", "profiles", "discoverPosts", "discoverProfiles", "discoverHashtags"],
 };
@@ -126,6 +126,10 @@ defineFlareSocialPlugin(guardPlugin("Newgrounds", withOpenLinks("Newgrounds", {
     post: {
       async detail(request, context) {
         return { post: await fetchDetail(context, request.key) };
+      },
+      // Flare's post page loads through context; it shows the post on its own.
+      async context(request, context) {
+        return { items: [{ type: "post", post: await fetchDetail(context, request.key) }], endReached: true };
       },
       async mutate(request, context) {
         if (request.action !== "Favourite" && request.action !== "Unfavourite") unsupported("Newgrounds doesn't support this action here");
