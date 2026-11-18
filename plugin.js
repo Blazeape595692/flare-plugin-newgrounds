@@ -116,10 +116,16 @@ defineFlareSocialPlugin(guardPlugin("Newgrounds", withOpenLinks("Newgrounds", {
   capabilities: {
     timeline: {
       async page(request, context) {
-        if (FEEDS[request.timelineId]) return feedPage(context, FEEDS[request.timelineId], request.page);
-        var path = LISTINGS[request.timelineId];
-        if (!path) unsupported("Unknown Newgrounds timeline");
-        return listingPage(context, path, request.page, request.timelineId === "games");
+        var result;
+        if (FEEDS[request.timelineId]) {
+          result = await feedPage(context, FEEDS[request.timelineId], request.page);
+        } else {
+          var path = LISTINGS[request.timelineId];
+          if (!path) unsupported("Unknown Newgrounds timeline");
+          result = await listingPage(context, path, request.page, request.timelineId === "games");
+        }
+        if (await accountCookies(context)) addFavouriteButtons(result.items);
+        return result;
       },
     },
 
@@ -158,7 +164,9 @@ defineFlareSocialPlugin(guardPlugin("Newgrounds", withOpenLinks("Newgrounds", {
             token: token,
           });
         }
-        return { type: "updatedPost", post: await fetchDetail(context, request.key) };
+        // Flare flips the button as soon as it's pressed. Returning the full post would
+        // swap a feed entry for its post-page version, so leave the post as shown.
+        return { type: "noChange" };
       },
     },
 
@@ -610,11 +618,24 @@ function cardPost(path, attrs, chunk, context) {
   return post;
 }
 
+// Signed-in timelines get a like (favourite) button on movies, games, art and audio.
+// Lists don't say whether you've already favourited something, so it starts unpressed;
+// pressing it again then just shows it as favourited.
+function addFavouriteButtons(items) {
+  asArray(items).forEach(function (item) {
+    var post = item && item.post;
+    if (!post || post.actions || !FAVOURITABLE.test(String(post.key && post.key.id))) return;
+    post.actions = [{ action: "Favourite", active: false }];
+  });
+}
+
+var FAVOURITABLE = /^(portal\/view\/\d+|art\/view\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+|audio\/listen\/\d+)$/;
+
 // ----------------------------------------------------------------- detail
 
 function itemPath(key) {
   var path = String(key.id);
-  if (!/^(portal\/view\/\d+|art\/view\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+|audio\/listen\/\d+)$/.test(path)) notFound("Unknown Newgrounds item");
+  if (!FAVOURITABLE.test(path)) notFound("Unknown Newgrounds item");
   return path;
 }
 
